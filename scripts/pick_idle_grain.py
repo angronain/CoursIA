@@ -2394,15 +2394,15 @@ def belt_snapshot_prime_inert(repo: str, numbers: list[int]) -> None:
 
 
 def has_recent_delivery_marker(issue_number: int) -> bool | None:
-    """Le DERNIER commentaire porte-t-il un marqueur de cloture recent ?
+    """Le DERNIER commentaire PORTEUR D'ETAT porte-t-il un marqueur de cloture recent ?
 
     TRI-ETAT (cf. `has_delivered_signal`) :
-    - ``True``  : le dernier commentaire a un en-tete `[DELIVERED]` ou
+    - ``True``  : ce commentaire a un en-tete `[DELIVERED]` ou
       `[FROZEN]`, ou porte un marqueur de livraison
       ``[INFO] candidate-delivered`` (grammaire `_DELIVERED_MARKER_RE`).
       Le candidat doit etre ecarte SANS
       appeler la sonde pleine -- c'est le filtre bon marche de #19768 ;
-    - ``False`` : aucun marqueur de cloture dans le dernier commentaire.
+    - ``False`` : aucun marqueur de cloture dans ce commentaire.
       L'appelant peut proceder a la sonde pleine. C'est le cas d'un
       en-tete `[RELEASED]` : une main rendue sur une barriere reelle
       laisse l'item SERVABLE (#21721), et une main rendue parce que le
@@ -2455,6 +2455,37 @@ def has_recent_delivery_marker(issue_number: int) -> bool | None:
                 or _closure_announced_close(body))
 
 
+def _comment_carries_state(body: str) -> bool:
+    """Ce corps porte-t-il un ETAT, au-dela de son en-tete ?
+
+    #24590 -- `skip_released` ecarte un commentaire des que sa PREMIERE ligne
+    est `[RELEASED]`. L'ancrage est juste sur le corpus de la flotte (25/25
+    des `[RELEASED]` de #19309 commencent a l'offset 0), mais l'en-tete ne dit
+    pas ce que le corps porte PLUS BAS : mesure sur ce meme corpus, 1 des 25
+    (2026-10-31T03:05Z, `[RELEASED] lane myia-po-2024:CoursIA -- EPIC 19309
+    ...`) porte aussi un `[INFO] candidate-delivered`. Le sauter en bloc
+    rendait cette declaration invisible au filtre bon marche, et l'etat lu
+    devenait celui du commentaire PRECEDENT.
+
+    Memes grammaires que les trois autres surfaces (sonde RECENTE, sonde
+    PLEINE, reducteur d'evenement) : elles ne peuvent pas diverger sur ce
+    qu'est un evenement d'etat. La forme `[RELEASED] ... acceptance deja
+    couverte` (#20351) est incluse ici comme partout -- elle est compensee
+    par la sonde pleine, mais un seul predicat vaut mieux qu'une exception.
+    """
+    if not isinstance(body, str) or not body:
+        return False
+    return bool(
+        _DELIVERED_MARKER_REVOKED_RE.search(body)
+        or _DELIVERED_MARKER_RE.search(body)
+        or _CONTAINER_DELIVERY_MARKER_RE.search(body)
+        or _RECENT_DELIVERY_MARKER_RE.search(body)
+        or _released_covers_acceptance(body)
+        or _closure_dossier_verdict(body) is not None
+        or _closure_announced_close(body)
+    )
+
+
 def _last_comment(issue_number: int,
                   skip_released: bool = False) -> dict | None:
     """Le DERNIER commentaire d'une issue (dictionnaire), en 1 requete.
@@ -2478,6 +2509,12 @@ def _last_comment(issue_number: int,
     Le laisser occuper la place du dernier commentaire contredisait cette
     doctrine par un effet de bord : il MASQUAIT le `[FROZEN]` ou le
     `[DELIVERED]` qu'il suivait.
+
+    Le saut ne porte pas sur l'en-tete SEUL (#24590) : un corps qui commence
+    par `[RELEASED]` et porte plus bas un marqueur d'etat EST un evenement, et
+    le sauter rendrait cette declaration invisible -- le predicat est
+    `_comment_carries_state`, le meme jeu de grammaires que les trois autres
+    surfaces.
 
     Mesure fondatrice (2026-11-04) : l'EPIC #19309, gel (FROZEN) par ai-01 le
     2026-11-03T07:50Z, a ete servie **quatre fois en dix heures** a trois
@@ -2521,7 +2558,9 @@ def _last_comment(issue_number: int,
             if not isinstance(candidate, dict):
                 continue
             body = candidate.get("body")
-            if isinstance(body, str) and _RELEASED_HEADER_RE.search(body):
+            if (isinstance(body, str)
+                    and _RELEASED_HEADER_RE.search(body)
+                    and not _comment_carries_state(body)):
                 continue
             return candidate
         return {}

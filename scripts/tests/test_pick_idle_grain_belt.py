@@ -1809,6 +1809,60 @@ def test_marqueur_de_conteneur_survit_a_un_released_de_queue(monkeypatch):
     assert pig.has_recent_container_delivery_marker(17528) is True
 
 
+# #24590 (2026-11-04) -- le saut d'un `[RELEASED]` de queue lit le CORPS, pas
+# seulement son en-tete. L'ancrage de `_RELEASED_HEADER_RE` est juste (25/25
+# des `[RELEASED]` du corpus #19309 commencent a l'offset 0), mais un corps
+# peut porter un etat PLUS BAS : 1 des 25 (2026-10-31T03:05Z, `[RELEASED] lane
+# myia-po-2024:CoursIA -- EPIC 19309 ...`) contient aussi un `[INFO]
+# candidate-delivered`. Le sauter en bloc rendait cette declaration invisible
+# au filtre bon marche, et l'etat lu devenait celui du commentaire PRECEDENT.
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("[RELEASED] lane myia-po-2024:CoursIA -- barriere reelle", False),
+    ("[RELEASED] lane myia-po-2024:CoursIA -- barriere reelle\n\n"
+     "Le service est bloque par le plan ; je rends la main.", False),
+    ("[RELEASED] lane myia-po-2024:CoursIA -- EPIC 19309\n\n"
+     "[INFO] candidate-delivered lane myia-po-2024:CoursIA -- pli 3, MERGE 6d0bd0",
+     True),
+    ("[RELEASED] lane myia-po-2024:CoursIA -- je rends la main\n\n"
+     "[FROZEN] lane myia-ai-01:CoursIA -- gel sous veto user", True),
+])
+def test_comment_carries_state_lit_tout_le_corps(body, expected):
+    """Le predicat partage : un en-tete `[RELEASED]` ne dit rien du corps."""
+    assert pig._comment_carries_state(body) is expected
+
+
+def test_released_de_queue_portant_une_livraison_n_est_pas_saute(monkeypatch):
+    """La livraison portee par un `[RELEASED]` reste visible du filtre.
+
+    Sans le correctif, ce commentaire etait saute : `_last_comment` remontait
+    au `[FROZEN]`, qui ne porte aucun marqueur de conteneur -- la declaration
+    de livraison disparaissait au lieu d'etre lue.
+    """
+    _stub_comment_thread(monkeypatch, [
+        "[FROZEN] lane myia-ai-01:CoursIA -- gel sous veto user",
+        "[RELEASED] lane myia-po-2024:CoursIA -- EPIC 19309\n\n"
+        "[INFO] candidate-delivered lane myia-po-2024:CoursIA -- pli 3, "
+        "MERGE 6d0bd02093",
+    ])
+    assert pig.has_recent_container_delivery_marker(19309) is True
+
+
+def test_released_de_queue_sans_etat_reste_saute(monkeypatch):
+    """Controle negatif : 24 des 25 du corpus portent de la prose, pas un etat.
+
+    Le saut doit rester entier pour eux -- sinon le defaut d'origine revient
+    (un `[RELEASED]` de queue masquant le `[FROZEN]` qu'il suit).
+    """
+    _stub_comment_thread(monkeypatch, [
+        "[FROZEN] lane myia-ai-01:CoursIA -- gel sous veto user",
+        "[RELEASED] lane myia-po-2024:CoursIA -- barriere reelle\n\n"
+        "Le service H3 est bloque par le plan ; je rends la main.",
+    ])
+    assert pig.has_recent_delivery_marker(19309) is True
+
+
 # Retractation du marqueur, cote TAPIS : la sonde que `main` injecte dans
 # cette boucle est `has_delivered_signal`, une implementation SEPAREE de
 # `_has_delivered_marker`. Sans la symetrie, le marqueur restait permanent
