@@ -2421,7 +2421,11 @@ def has_recent_delivery_marker(issue_number: int) -> bool | None:
     recentes servies par le tapis -- cette fonction les aurait
     ecartes avant l'epuisement du budget de la sonde pleine.
     """
-    last = _last_comment(issue_number)
+    # `skip_released` : un `[RELEASED]` de queue ne doit pas masquer le
+    # `[FROZEN]` qu'il suit (mesure #19309, 2026-11-04 -- quatre services en
+    # dix heures). Sans lui, la doctrine « `[RELEASED]` n'est pas une
+    # cloture » etait inversee par un effet de bord de position.
+    last = _last_comment(issue_number, skip_released=True)
     if last is None:
         return None
     body = last.get("body") or ""
@@ -2451,7 +2455,8 @@ def has_recent_delivery_marker(issue_number: int) -> bool | None:
                 or _closure_announced_close(body))
 
 
-def _last_comment(issue_number: int) -> dict | None:
+def _last_comment(issue_number: int,
+                  skip_released: bool = False) -> dict | None:
     """Le DERNIER commentaire d'une issue (dictionnaire), en 1 requete.
 
     TRI-ETAT :
@@ -2465,6 +2470,22 @@ def _last_comment(issue_number: int) -> dict | None:
     L'horodatage est HERE parce que la regle de la reouverture (#24250) doit
     dater la decision de cloture : le corps seul ne permet pas de dire si la
     reouverture lui est posterieure.
+
+    ``skip_released`` -- remonter au dernier commentaire PORTEUR D'ETAT, en
+    sautant les `[RELEASED]` de queue. Le protocole du tapis dit qu'un
+    `[RELEASED]` n'est ni une cloture ni une reouverture : c'est une lane qui
+    rend la main (#21721, doctrine en tete de `_RECENT_DELIVERY_MARKER_RE`).
+    Le laisser occuper la place du dernier commentaire contredisait cette
+    doctrine par un effet de bord : il MASQUAIT le `[FROZEN]` ou le
+    `[DELIVERED]` qu'il suivait.
+
+    Mesure fondatrice (2026-11-04) : l'EPIC #19309, gel (FROZEN) par ai-01 le
+    2026-11-03T07:50Z, a ete servie **quatre fois en dix heures** a trois
+    lanes -- chacune postant son `[RELEASED]`, qui reprenait la place du
+    dernier commentaire et rendait le gel invisible a la passe suivante. Le
+    cout d'un `[RELEASED]` devenait negatif : plus une lane en posait, plus
+    l'item remontait. La remontee ne coute aucune requete : la liste des
+    commentaires est deja en memoire, seul l'element lu change.
 
     #22630 -- l'instantane local rend les memes commentaires, sans requete :
     la lecture passe par `_snapshot_comments` quand l'instantane de la passe
@@ -2492,13 +2513,26 @@ def _last_comment(issue_number: int) -> dict | None:
         comments = payload.get("comments") or []
     if not isinstance(comments, list) or not comments:
         return {}
+    if skip_released:
+        # Remontee bornee : un fil dont TOUS les commentaires sont des
+        # `[RELEASED]` ne porte aucun etat, et `{}` est alors le bon verdict
+        # (rien ne dit que l'item est clos -- il reste servable).
+        for candidate in reversed(comments):
+            if not isinstance(candidate, dict):
+                continue
+            body = candidate.get("body")
+            if isinstance(body, str) and _RELEASED_HEADER_RE.search(body):
+                continue
+            return candidate
+        return {}
     last = comments[-1]
     if not isinstance(last, dict):
         return {}
     return last
 
 
-def _last_comment_body(issue_number: int) -> str | None:
+def _last_comment_body(issue_number: int,
+                       skip_released: bool = False) -> str | None:
     """Le corps du DERNIER commentaire d'une issue, en 1 requete.
 
     TRI-ETAT :
@@ -2513,11 +2547,15 @@ def _last_comment_body(issue_number: int) -> str | None:
     « marqueur de CONTENEUR » lisent le meme octet : deux lectures du meme
     fil ne peuvent pas diverger sur un fil qui change entre les deux.
 
+    ``skip_released`` traverse jusqu'a `_last_comment` : un `[RELEASED]` de
+    queue ne masque pas le marqueur qu'il suit (meme defaut, meme remede --
+    cf #19309, 2026-11-04).
+
     #22630 -- l'instantane local rend les memes commentaires, sans requete :
     la lecture passe par `_snapshot_comments` quand l'instantane de la passe
     est disponible, et retombe sur la requete historique sinon.
     """
-    last = _last_comment(issue_number)
+    last = _last_comment(issue_number, skip_released=skip_released)
     if last is None:
         return None
     body = last.get("body") or ""
@@ -2556,7 +2594,7 @@ def has_recent_container_delivery_marker(issue_number: int) -> bool | None:
     Cout : **1 requete** `gh issue view --json comments`, comme le filtre
     recent -- et HORS budget de sonde.
     """
-    body = _last_comment_body(issue_number)
+    body = _last_comment_body(issue_number, skip_released=True)
     if body is None:
         return None
     if not body:

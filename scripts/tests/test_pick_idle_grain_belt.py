@@ -1742,6 +1742,73 @@ def test_container_marker_without_comment_is_false(monkeypatch):
     assert pig.has_recent_container_delivery_marker(17528) is False
 
 
+# #19309 (2026-11-04) -- un `[RELEASED]` de queue ne masque pas le marqueur
+# qu'il suit. Le protocole du tapis dit qu'un `[RELEASED]` n'est ni une
+# cloture ni une reouverture ; en occupant la place du dernier commentaire, il
+# l'etait devenu par effet de bord. Mesure fondatrice : l'EPIC #19309, gel le
+# 2026-11-03T07:50Z, servie QUATRE fois en dix heures a trois lanes -- chaque
+# `[RELEASED]` poste la remettait en tete du tapis.
+
+
+def _stub_comment_thread(monkeypatch, bodies, reopen_events=()):
+    """Force le transport : le fil porte `bodies`, dans l'ordre chronologique."""
+    payload = json.dumps({"comments": [{"body": b} for b in bodies]})
+
+    def fake_run(cmd, *args, **kwargs):
+        assert cmd[:3] == ["gh", "issue", "view"], f"transport : {cmd}"
+        return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(pig.subprocess, "run", fake_run)
+    monkeypatch.setattr(pig, "_reopen_events",
+                        lambda issue: list(reopen_events))
+
+
+@pytest.mark.parametrize("trailer", [
+    ["[RELEASED] lane myia-po-2024:CoursIA -- barriere reelle, plis geles"],
+    ["[RELEASED] lane myia-po-2023:CoursIA -- barriere inchangee",
+     "[RELEASED] lane myia-po-2024:CoursIA-2 -- plis 4 a 9 geles"],
+])
+def test_frozen_survit_a_une_queue_de_released(monkeypatch, trailer):
+    """Un `[FROZEN]` suivi de `[RELEASED]` reste une cloture."""
+    _stub_comment_thread(
+        monkeypatch,
+        ["[FROZEN] lane myia-ai-01:CoursIA -- gel sous veto user"] + trailer,
+    )
+    assert pig.has_recent_delivery_marker(19309) is True
+
+
+def test_released_seul_ne_ferme_toujours_rien(monkeypatch):
+    """Controle negatif : sans marqueur de cloture devant, rien n'est clos.
+
+    La remontee ne doit pas fabriquer une cloture a partir d'une discussion
+    ordinaire : `[RELEASED]` reste une main rendue, l'item reste servable.
+    """
+    _stub_comment_thread(monkeypatch, [
+        "Discussion sans marqueur.",
+        "[RELEASED] lane myia-po-2024:CoursIA -- barriere reelle",
+    ])
+    assert pig.has_recent_delivery_marker(19309) is False
+
+
+def test_thread_de_released_nus_ne_ferme_rien(monkeypatch):
+    """Un fil dont TOUS les commentaires sont des `[RELEASED]` ne porte aucun
+    etat : rien ne dit que l'item est clos."""
+    _stub_comment_thread(monkeypatch, [
+        "[RELEASED] lane myia-po-2023:CoursIA -- barriere reelle",
+        "[RELEASED] lane myia-po-2024:CoursIA -- barriere reelle",
+    ])
+    assert pig.has_recent_delivery_marker(19309) is False
+
+
+def test_marqueur_de_conteneur_survit_a_un_released_de_queue(monkeypatch):
+    """Meme defaut cote CONTENEUR : le marqueur de livraison n'est pas masque."""
+    _stub_comment_thread(monkeypatch, [
+        "[INFO] candidate-delivered lane myia-po-2027:CoursIA -- EPIC close",
+        "[RELEASED] lane myia-po-2024:CoursIA -- je rends la main",
+    ])
+    assert pig.has_recent_container_delivery_marker(17528) is True
+
+
 # Retractation du marqueur, cote TAPIS : la sonde que `main` injecte dans
 # cette boucle est `has_delivered_signal`, une implementation SEPAREE de
 # `_has_delivered_marker`. Sans la symetrie, le marqueur restait permanent
